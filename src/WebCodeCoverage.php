@@ -1,24 +1,35 @@
 <?php
 use SebastianBergmann\CodeCoverage\CodeCoverage;
-// 没使用，先放这里，这是一个用于增量覆盖测试 http 的类。
-class WebCodeCoverage  // @codeCoverageIgnoreStart
+
+class WebCodeCoverage
 {
     public $options=[
 		'path'=>null,
 		'path_src'=>'src',
 		'path_dump'=>'test_coveragedumps',
 		'path_report'=>'test_reports',
-        'auto_report'=>true,
+        
         'reg_shutdown'=>true,
+        'auto_report'=>true,
         'tests' =>[
             'a'=>[
                 '/',
             ],
+            'b'=>[
+                '/test/done',
+            ],
         ],
     ];
 	public $is_inited =true;
-    protected $coverage;
-    /////////////////////////
+    
+    public $coverage;
+    
+    protected $name;
+    protected $url;
+    protected $post;
+    protected $hash;
+    
+    ////[[[[
     public static function G($object=null)
     {
         if (defined('__SINGLETONEX_REPALACER')) {
@@ -37,6 +48,7 @@ class WebCodeCoverage  // @codeCoverageIgnoreStart
         }
         return $instance->run();
     }
+    ////]]]]
     public function init(array $options, ?object $context = null)
     {
         $this->options = array_intersect_key(array_replace_recursive($this->options, $options) ?? [], $this->options);
@@ -52,7 +64,6 @@ class WebCodeCoverage  // @codeCoverageIgnoreStart
 		if(!is_dir($this->options['path_report'])){
 			mkdir($this->options['path_report']);
 		}
-        $this->rebuildFileCache();
 		$this->is_inited = true;
         return $this;
     }
@@ -70,26 +81,45 @@ class WebCodeCoverage  // @codeCoverageIgnoreStart
     }
     protected function checkPermission()
     {
+        if (PHP_SAPI === 'cli') {
+            return false;
+        }
+        $id=$_SEREVER['HTTP_WEBCOVERAGE_ID']??null;
+        if(empty($id)){
+            $this->hash = $this->createHashFile();
+        }else{
+            //TODO 判断合法性
+            $this->hash = trim($id);
+        }
+        
         return true;
     }
-    ////
+    //// 入口1
     public function run()
     {
+    
         if(!$this->isInited()){
             $this->init([]);
         }
-        if($this->checkPermission()){
+
+        if(!$this->checkPermission()){
             return false;
         }
         if($this->options['reg_shutdown']){
             register_shutdown_function([static::class,'OnShutDown']);
         }
-        $name =$this->getName();
-        $this->coverage = new CodeCoverage();
-        $path=$this->options['path_src'];
+        $path = $this->options['path_src'];
+        $this->coverage = new CodeCoverage();  // 这里要不要和 用 newCodever 助手函数？
         $this->coverage->filter()->addDirectoryToWhitelist($path);
-        $this->coverage->start($name);
-        
+        /*
+        $coverage->setTests([
+          'T' =>[
+            'size' => 'unknown',
+            'status' => -1,
+          ],
+        ]);
+        */
+        $this->coverage->start($this->getRequestName());
         return true;
     }
     public static function OnShutDown()
@@ -99,34 +129,56 @@ class WebCodeCoverage  // @codeCoverageIgnoreStart
     public function _OnShutDown()
     {
         $this->coverage->stop();
-        $path=realpath($this->options['path_dump']).'/'.DATE('Ymd-His').'.json';
-        $this->dump($this->coverage, $path);
+        $data = $this->coverage->getData(true);
+        $data = $this->postpareData($data);
+        $dir = $this->options['path_dump'];
+        
+        $filename= DATE('Ymd-His') md5($this->getRequestName());
+        // 文件名要时间优先。因为旧文件要覆盖新文件。
+        
+        // 我们把 request hash 一下
+        
+        // 保存文件还是放一起，然后挨个读取过滤？ 虽然总 hash 不同，但是用到的分文件 hash 还是相同的。
+        // 我们不仅仅是要保存资源数据，还要保存hash 信息
+        //$data =
+        file_put_contents($dir.$filename.'.json',json_encode($data,JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK)); // 把总 hash 信息，文件 md5 信息都找出来。
     }
-    public function cleanOldData()
-    {
-        //
-    }
+    //*/
+    ///////////////////////////////////////////////////////////
+    
     public function report()
     {
-        $coverage = new CodeCoverage();
-        $coverage->filter()->addDirectoryToWhitelist($this->options['path_src']);
-        $coverage->setTests([
-          'T' =>[
-            'size' => 'unknown',
-            'status' => -1,
-          ],
-        ]);
-        $files=$this->filterJsonFile($this->options['path_dump']);
+        $coverage = $this->newCodeCoverage();
+        $files = $this->scanFiles($this->options['path_dump'], '.json');
+        
+        ////[[[[
         foreach ($files as $file) {
-            $data=file_get_contents($file);
-            $object=$this->createFromJson(json_decode($data,true));
-            if(!$object){
+            $data = file_get_contents($file);
+            $data = json_decode($data,true);
+            if(!$this->match($data)){
+                //rename($file,$file.'.old');
                 continue;
             }
-            echo "Merge: $file \n";
+            $object = $this->newCodeCoverage();
+            
+            $object->setData($data['data']);
+            
+            //TODO 最好还是自己merge ，否则一个测试上百条请求怎么办？
             $coverage->merge($object);
         }
-         echo "reporting...\n";
+        ////]]]]
+        $this->process($coverage,$this->options['path_report']);
+    }
+    protected function match($data)
+    {
+        //从这些文件的文件名，索引 hash 文件的 md5 。
+        // 和当前 hash 的 md5 比较。
+        $data['hash']
+        
+        return true;
+    }
+    protected function process($coverage,$path)
+    {
         $writer = new \SebastianBergmann\CodeCoverage\Report\Html\Facade;
         $writer->process($coverage, $this->options['path_report']);
         
@@ -142,27 +194,34 @@ class WebCodeCoverage  // @codeCoverageIgnoreStart
     }
     public function cover()
     {
+        $hash = $this->createHashFile();
         
         foreach($this->options['tests'] as $name => $test){
             $ch = curl_init();
-            foreach($tests as $name =>$url){
-                @list($url,$post) = explode(' ',$url);
-                if(!$post){
+            curl_setopt($ch, CURLOPT_HTTPHEADER, ['WebCoverage-Id: '.$hash]);
+            foreach($test as $name =>$path){
+                //TODO 如果碰到特殊指令时候还要调整
+                @list($url,$post) = explode(' ',$path);
+                
+                $url="http://127.0.0.1:8080".$path; //TODO 这里要可调。
+                if($post){
                     curl_setopt($ch, CURLOPT_POST,true);
+                    curl_setopt($ch, CURLOPT_POSTFIELDS,$post);
                 }
                 curl_setopt($ch, CURLOPT_URL, $url);
                 curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
                 curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
-
+                
+                $ret = curl_exec($ch);
             }
             curl_close($ch);
-            
-        
         }
-    }
-    
-    protected function curl_file_get_contents($url,$ch)
-    {
+        if($this->options['auto_report']){
+            $this->report();
+        }
+        
+        var_dump(DATE(DATE_ATOM));
+        /*
         if (is_array($url)) {
             list($base_url, $real_host) = $url;
             $url = $base_url;
@@ -171,200 +230,61 @@ class WebCodeCoverage  // @codeCoverageIgnoreStart
             $c = $host.':'.$port.':'.$real_host;
             curl_setopt($ch, CURLOPT_CONNECT_TO, [$c]);
         }
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
-        
-        $data = curl_exec($ch);
-        
-        return $data;
+        */
     }
-    //////////////////////////
-    protected static function include_file($file)
-    {
-        return include $file;
-    }
-    protected function filterPhpFile($source)
-    {
-        return $this->filterFile($source,'.php');
-    }
-    protected function filterJsonFile($source)
-    {
-        return $this->filterFile($source,'.json');
-    }
-    protected function filterFile($source,$ext)
+    protected function scanFiles($source,$ext)
     {
         $directory = new \RecursiveDirectoryIterator($source, \FilesystemIterator::CURRENT_AS_PATHNAME | \FilesystemIterator::FOLLOW_SYMLINKS);
         $iterator = new \RecursiveIteratorIterator($directory);
         $ret = new \RegexIterator ($iterator, '/'.preg_quote($ext).'$/',\RegexIterator::MATCH);
         $ret = \array_values(\iterator_to_array($ret));
+        ksort($ret);
+        
         return $ret;
     }
-    ////
+    protected function createHashFile()
+    {
+        $files = $this->scanFiles($this->options['path_src'],'.php');
+        $data=[];
+        foreach($files as $file){
+            $md5 = md5(file_get_contents($file));
+            $data[$md5]=$file;
+        }
+        $str=json_encode($data,JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK);
+        $id = md5($str);
+        file_put_contents($this->options['path_dump'].$id.'.hash',$str);
+        return $id;
+    }
     protected function getRequestName()
     {
-        return $_SERVER['REQUEST_URI'] ?? 'XX';
+        if ($_POST ?? false) {
+            return $_SERVER['REQUEST_URI'].' '. http_build_query($_POST);
+        }
+        return $_SERVER['REQUEST_URI'];
     }
-    protected function getName()
+    // helper
+    protected function newCodeCoverage()
     {
-        return $_SERVER['REQUEST_URI'] ?? 'xx';
-    }
-    protected function dump(CodeCoverage $coverage, string $target)
-    {
-        $input=$coverage->getData(true);
-        
-        ////$this->save($coverage,$this->options['path_dump'].'in.php');
-        $uuid_result=uniqid();
-        $uuid_emptys=uniqid();
-        $uuid_blanks=uniqid();
-        $ret=[
-            'request'=> $this->getRequestName(),
-            'name' =>$this->getName(),
-            'date'=>DATE(DATE_ATOM),
-            'file_md5'=>[],
-            'result'=>$uuid_result,
-            'blanks'=>$uuid_blanks,
-            'emptys'=>$uuid_emptys,
-        ];
-        $file_md5=[];
-        $result=[];
-        $blanks=[];
-        $emptys=[];
-        
-        foreach($input as $fullfile=>$v){
-            $file=substr($fullfile,strlen($this->options['path_src']));
-            $md5=$this->getFileMd5($file);
-            $file_md5[$md5]=$file;
-            $result[$file]=[];
-            $emptys[$file]=[];
-            foreach($v as $line => $d){
-                if(is_null($d)){
-                    $emptys[$file][]=$line;
-                    continue;
-                }
-                if(empty($d) && is_array($d)){
-                    $blanks[$file][]=$line;
-                    continue;
-                }
-                $result[$file][]=$line;
-            }
-        }
-        $ret['file_md5']=$file_md5;
-        
-
-        $output =json_encode($ret, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK);
-        $result =json_encode($result, JSON_NUMERIC_CHECK);
-        $blanks =json_encode($blanks, JSON_NUMERIC_CHECK);
-        $emptys =json_encode($emptys, JSON_NUMERIC_CHECK);
-        
-        $output=str_replace('"'.$uuid_result.'"',$result,$output);
-        $output=str_replace('"'.$uuid_blanks.'"',$blanks,$output);
-        $output=str_replace('"'.$uuid_emptys.'"',$emptys,$output);
-        
-        file_put_contents($target,$output);
-        
-        return $output;
-    }
-    protected function getFileMd5($file)
-    {
-        $ret=$this->file_md5[$file]??null;
-        if($ret === null){
-            return md5(@file_get_contents($fullfile));
-        }
-        return $ret;
-    }
-    protected function rebuildFileCache()
-    {
-        $cache_file=$this->options['path_dump'].'.md5_cache';
-        $cache=@file_get_contents($cache_file);
-        $cache=@json_decode($cache,true);
-        $cache=$cache ?? [];
-        $mtimes=$cache['mtime']??[];
-        $md5s=$cache['md5']??[];
-        $is_change = false;
-        
-        $files=$this->filterPhpFile($this->options['path_src']);
-        
-        foreach($files as $file){
-            $date = DATE(DATE_ATOM,filemtime($file));
-            $file=substr($file,strlen($this->options['path_src']));
-            if(!isset($mtimes[$file]) || $date !=$mtimes[$file]){
-                $md5s[$file]=md5(file_get_contents($this->options['path_src'].$file));
-                $mtimes[$file]=$date;
-                $is_change=true;
-            }
-        }
-        if($is_change){
-            $data = json_encode(['md5'=>$md5s, 'mtime'=>$mtimes],JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK);
-            file_put_contents($cache_file,$data);
-        }
-        $this->file_md5=$md5s;
-    }
-    protected function createFromJson($input,$force = false)
-    {
-        if($input === null){
-            //var_dump("No Input");
-            return null;
-        }
-        $name=$input['name'];
-        $file_md5=$input['file_md5']??[];
-        $t=array_flip($file_md5);
-        $t=array_diff_assoc($t,$this->file_md5);
-        if(!$force && !empty($t)){
-            return null;
-        }
-        $data=[];
-        
-        foreach($input['result'] as $file => $v){
-            $key=$this->options['path_src'].$file;
-            $data[$key] = $data[$key] ?? [];
-            
-            // dot not  array_merge ,cause a bug.
-            foreach($v as $t){
-                $data[$key][$t]=[$name];
-            }
-        }
-        foreach($input['blanks'] as $file => $v){
-            $key=$this->options['path_src'].$file;
-            $data[$key] = $data[$key] ?? [];
-            
-            // dot not  array_merge ,cause a bug.
-            foreach($v as $t){
-                $data[$key][$t]=[];
-            }
-        }
-        //*
-        foreach($input['emptys'] as $file => $v){
-            $key=$this->options['path_src'].$file;
-            $data[$key] = $data[$key] ?? [];
-            foreach($v as $t){
-                $data[$key][$t]=null;
-            }
-        }
-        foreach($data as $k=> &$v){
-            ksort($v);
-        }
-        unset($v);
-        
         $coverage = new CodeCoverage();
-        $coverage->setData($data);
+        $coverage->filter()->addDirectoryToWhitelist($this->options['path_src']);
         $coverage->setTests([
-            $name =>[
-                'size' => 'unknown',
-                'status' => -1,
-            ],
+          'T' =>[
+            'size' => 'unknown',
+            'status' => -1,
+          ],
         ]);
-        $filter = $coverage->filter();
-        $filter->setWhitelistedFiles( array_fill_keys(array_keys($data),true) );
-        
-        /////////$this->save($coverage,$this->options['path_dump'].'out.php');
         return $coverage;
     }
-    protected function save($coverage,$path)
-    {
-        $writer = new \SebastianBergmann\CodeCoverage\Report\PHP;
-        $writer->process($coverage, $path);
-    }
     
-
-} // @codeCoverageIgnoreEnd
+    protected function postpareData($data)
+    {
+        $ret=[
+            'hash' => $this->hash,
+            'request' => $this->getRequestName(),
+            'date'=>DATE(DATE_ATOM),
+        ];
+        $ret['data']=$data;
+        
+        return $ret;
+    }
+}
