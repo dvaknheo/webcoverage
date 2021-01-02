@@ -133,7 +133,7 @@ class WebCodeCoverage
         $data = $this->postpareData($data);
         $dir = $this->options['path_dump'];
         
-        $filename= DATE('Ymd-His') md5($this->getRequestName());
+        $filename= DATE('Ymd-His').md5($this->getRequestName());
         // 文件名要时间优先。因为旧文件要覆盖新文件。
         
         // 我们把 request hash 一下
@@ -173,7 +173,7 @@ class WebCodeCoverage
     {
         //从这些文件的文件名，索引 hash 文件的 md5 。
         // 和当前 hash 的 md5 比较。
-        $data['hash']
+        //$data['hash']
         
         return true;
     }
