@@ -1,7 +1,7 @@
 <?php
 use SebastianBergmann\CodeCoverage\CodeCoverage;
 
-class WebCodeCoverage
+class WebCoverage
 {
     public $options=[
 		'path'=>null,
