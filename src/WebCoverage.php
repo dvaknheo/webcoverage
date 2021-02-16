@@ -11,6 +11,8 @@ class WebCoverage
         
         'reg_shutdown'=>true,
         'auto_report'=>true,
+        
+        // 这里先做测试了
         'tests' =>[
             'a'=>[
                 '/',
@@ -20,9 +22,9 @@ class WebCoverage
             ],
         ],
     ];
-	public $is_inited =true;
+	public $is_inited = false;
     
-    public $coverage;
+    public $coverage;  //
     
     protected $name;
     protected $url;
@@ -30,15 +32,25 @@ class WebCoverage
     protected $hash;
     
     ////[[[[
-    public static function G($object=null)
+    protected static $_instances = [];
+    public static function G($object = null)
     {
         if (defined('__SINGLETONEX_REPALACER')) {
             $callback = __SINGLETONEX_REPALACER;
             return ($callback)(static::class, $object);
         }
-        static $_instance;
-        $_instance=$object?:($_instance??new static);
-        return $_instance;
+        //fwrite(STDOUT,"SINGLETON ". static::class ."\n");
+        if ($object) {
+            self::$_instances[static::class] = $object;
+            return $object;
+        }
+        $me = self::$_instances[static::class] ?? null;
+        if (null === $me) {
+            $me = new static();
+            self::$_instances[static::class] = $me;
+        }
+        
+        return $me;
     }
     public static function RunQuickly(array $options = [], callable $after_init = null)
     {
@@ -49,6 +61,10 @@ class WebCoverage
         return $instance->run();
     }
     ////]]]]
+    public function isInited():bool
+    {
+        return $this->is_inited;
+    }
     public function init(array $options, ?object $context = null)
     {
         $this->options = array_intersect_key(array_replace_recursive($this->options, $options) ?? [], $this->options);
@@ -58,12 +74,7 @@ class WebCoverage
 		$this->options['path_dump'] = $this->getComponenetPathByKey('path_dump');
         $this->options['path_report'] = $this->getComponenetPathByKey('path_report');
 		
-		if(!is_dir($this->options['path_dump'])){
-			mkdir($this->options['path_dump']);
-		}
-		if(!is_dir($this->options['path_report'])){
-			mkdir($this->options['path_report']);
-		}
+        
 		$this->is_inited = true;
         return $this;
     }
@@ -75,117 +86,141 @@ class WebCoverage
             return $this->options['path'].rtrim($this->options[$path_key], '/').'/';
         }
     }
-    public function isInited():bool
-    {
-        return $this->is_inited;
-    }
+
+    /////////////////////////////
+    // 这里最折腾的一点
     protected function checkPermission()
     {
-        if (PHP_SAPI === 'cli') {
-            return false;
-        }
-        $id=$_SEREVER['HTTP_WEBCOVERAGE_ID']??null;
-        if(empty($id)){
-            $this->hash = $this->createHashFile();
-        }else{
-            //TODO 判断合法性
-            $this->hash = trim($id);
-        }
-        
+        $this->hash=md5(microtime());
         return true;
+    }
+    protected function getRequestName()
+    {
+        if ($_POST ?? false) {
+            return $_SERVER['REQUEST_URI'].' '. http_build_query($_POST);
+        }
+        return $_SERVER['REQUEST_URI'];
     }
     //// 入口1
     public function run()
     {
-    
-        if(!$this->isInited()){
-            $this->init([]);
-        }
-
         if(!$this->checkPermission()){
             return false;
         }
         if($this->options['reg_shutdown']){
             register_shutdown_function([static::class,'OnShutDown']);
         }
-        $path = $this->options['path_src'];
-        $this->coverage = new CodeCoverage();  // 这里要不要和 用 newCodever 助手函数？
-        $this->coverage->filter()->addDirectoryToWhitelist($path);
-        /*
-        $coverage->setTests([
-          'T' =>[
-            'size' => 'unknown',
-            'status' => -1,
-          ],
-        ]);
-        */
+        $this->coverage = $this->newCodeCoverage();
         $this->coverage->start($this->getRequestName());
         return true;
     }
+    
     public static function OnShutDown()
     {
         return static::G()->_OnShutDown();
     }
     public function _OnShutDown()
     {
+		if(!is_dir($this->options['path_dump'])){
+			mkdir($this->options['path_dump']);
+		}
+        
         $this->coverage->stop();
-        $data = $this->coverage->getData(true);
-        $data = $this->postpareData($data);
+        
         $dir = $this->options['path_dump'];
         
-        $filename= DATE('Ymd-His').md5($this->getRequestName());
-        // 文件名要时间优先。因为旧文件要覆盖新文件。
+        $data = $this->coverage->getData(true);
+        $this->saveMetaData($data);
+        $this->saveContent($data);
+    }
+    protected function saveMetaData($input)
+    {
+        $ret=[
+            'base_path'=>$this->options['path_src'],
+            'request'=> $this->getRequestName(),
+            'name' =>$this->getRequestName(),
+            'date'=>DATE(DATE_ATOM),
+            'files'=>[],
+        ];
+        foreach($input as $fullfile=>$v){
+            $file=substr($fullfile,strlen($this->options['path_src']));
+            $t[$file]=filemtime($fullfile);
+        }
+        $ret['files'] = $t;
         
-        // 我们把 request hash 一下
-        
-        // 保存文件还是放一起，然后挨个读取过滤？ 虽然总 hash 不同，但是用到的分文件 hash 还是相同的。
-        // 我们不仅仅是要保存资源数据，还要保存hash 信息
-        //$data =
-        file_put_contents($dir.$filename.'.json',json_encode($data,JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK)); // 把总 hash 信息，文件 md5 信息都找出来。
+        $file = $this->options['path_dump'].$_SERVER['REQUEST_TIME_FLOAT'].'.req';
+        file_put_contents($file,json_encode($ret,JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    }
+    
+    protected function saveContent($data)
+    {
+        $file = $this->options['path_dump'].$_SERVER['REQUEST_TIME_FLOAT'].'.req.data';
+        file_put_contents($file,json_encode($data,JSON_UNESCAPED_UNICODE|JSON_NUMERIC_CHECK));
     }
     //*/
-    ///////////////////////////////////////////////////////////
+    // 以上是服务端。
     
-    public function report()
+    ///////////////////////////////////////////////////////////
+    public function clean()
     {
+        $mtimes = $this->getSourceMtimes();
         $coverage = $this->newCodeCoverage();
-        $files = $this->scanFiles($this->options['path_dump'], '.json');
-        
-        ////[[[[
+        $files = $this->scanFiles($this->options['path_dump'], '.req');
         foreach ($files as $file) {
-            $data = file_get_contents($file);
-            $data = json_decode($data,true);
-            if(!$this->match($data)){
-                //rename($file,$file.'.old');
+            $meta = json_decode(file_get_contents($file),true);
+            if(!$this->match($mtimes,$meta)){
+                // skip ile;
                 continue;
             }
+            
+        }
+    }
+    // 脚本生成报告
+    public function report()
+    {
+		if(!is_dir($this->options['path_report'])){
+			@mkdir($this->options['path_report']);
+		}
+        
+        $mtimes = $this->getSourceMtimes();
+        $coverage = $this->newCodeCoverage();
+        
+        $files = $this->scanFiles($this->options['path_dump'], '.req');
+        ksort($files); // 按音序排。
+        foreach ($files as $file) {
+            $meta = json_decode(file_get_contents($file),true);
+            if(!$this->match($mtimes,$meta)){
+                // skip;
+                continue;
+            }
+            $data =json_decode(file_get_contents($file.'.data'),true);
             $object = $this->newCodeCoverage();
-            
-            $object->setData($data['data']);
-            
+            $object->setData($data);
             //TODO 最好还是自己merge ，否则一个测试上百条请求怎么办？
             $coverage->merge($object);
         }
         ////]]]]
-        $this->process($coverage,$this->options['path_report']);
+        $ret = $this->process($coverage,$this->options['path_report']);
+        var_dump($ret);
     }
-    protected function match($data)
+    
+    // 看是否符合条件
+    protected function match($mtimes,$meta)
     {
-        //从这些文件的文件名，索引 hash 文件的 md5 。
-        // 和当前 hash 的 md5 比较。
-        //$data['hash']
-        
-        return true;
+        $data = array_diff_assoc($meta['files'],$mtimes);
+        return empty($data) ? true : false;
     }
     protected function process($coverage,$path)
     {
         $writer = new \SebastianBergmann\CodeCoverage\Report\Html\Facade;
-        $writer->process($coverage, $this->options['path_report']);
+        
+        // 为什么会有个 Notice ?
+        @$writer->process($coverage, $this->options['path_report']); 
         
         $report = $coverage->getReport();
         $lines_tested = $report->getNumExecutedLines();
         $lines_total = $report->getNumExecutableLines();
-        $lines_percent = sprintf('%0.2f%%',$lines_tested/$lines_total *100);
+        $lines_percent = sprintf('%0.2f%%',$lines_tested/($lines_total ?:1) *100);
         return [
             'lines_tested'=>$lines_tested,
             'lines_total'=>$lines_total,
@@ -194,8 +229,6 @@ class WebCoverage
     }
     public function cover()
     {
-        $hash = $this->createHashFile();
-        
         foreach($this->options['tests'] as $name => $test){
             $ch = curl_init();
             curl_setopt($ch, CURLOPT_HTTPHEADER, ['WebCoverage-Id: '.$hash]);
@@ -219,19 +252,19 @@ class WebCoverage
         if($this->options['auto_report']){
             $this->report();
         }
-        
         var_dump(DATE(DATE_ATOM));
-        /*
-        if (is_array($url)) {
-            list($base_url, $real_host) = $url;
-            $url = $base_url;
-            $host = parse_url($url, PHP_URL_HOST);
-            $port = parse_url($url, PHP_URL_PORT);
-            $c = $host.':'.$port.':'.$real_host;
-            curl_setopt($ch, CURLOPT_CONNECT_TO, [$c]);
-        }
-        */
     }
+    protected function getSourceMtimes()
+    {
+        $input = $this->scanFiles($this->options['path_src'],'.php');
+        $data=[];
+        foreach($input as $fullfile){
+            $file=substr($fullfile,strlen($this->options['path_src']));
+            $data[$file]=filemtime($fullfile);
+        }
+        return $data;
+    }    
+    // 扫描文件 ,改用 glob 更好点
     protected function scanFiles($source,$ext)
     {
         $directory = new \RecursiveDirectoryIterator($source, \FilesystemIterator::CURRENT_AS_PATHNAME | \FilesystemIterator::FOLLOW_SYMLINKS);
@@ -242,26 +275,7 @@ class WebCoverage
         
         return $ret;
     }
-    protected function createHashFile()
-    {
-        $files = $this->scanFiles($this->options['path_src'],'.php');
-        $data=[];
-        foreach($files as $file){
-            $md5 = md5(file_get_contents($file));
-            $data[$md5]=$file;
-        }
-        $str=json_encode($data,JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_NUMERIC_CHECK);
-        $id = md5($str);
-        file_put_contents($this->options['path_dump'].$id.'.hash',$str);
-        return $id;
-    }
-    protected function getRequestName()
-    {
-        if ($_POST ?? false) {
-            return $_SERVER['REQUEST_URI'].' '. http_build_query($_POST);
-        }
-        return $_SERVER['REQUEST_URI'];
-    }
+
     // helper
     protected function newCodeCoverage()
     {
@@ -276,6 +290,7 @@ class WebCoverage
         return $coverage;
     }
     
+    // 补充数据
     protected function postpareData($data)
     {
         $ret=[
